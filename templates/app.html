@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<head>
+  <title>PubNub Test</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="//code.jquery.com/ui/1.12.1/themes/base/jquery-ui.css">
+  <script src="https://code.jquery.com/jquery-1.12.4.js"></script>
+  <script src="https://code.jquery.com/ui/1.12.1/jquery-ui.js"></script>
+  <script src="https://cdn.pubnub.com/sdk/javascript/pubnub.4.10.0.min.js"></script>
+  <script>
+    var userName = "";
+    var productName = "";
+    var productPresenceChannel = "";
+    var ticketsStatus = new Object();
+    var ticketPresenceChannels = new Object();
+    var urlParams = new URLSearchParams(window.location.search);
+
+
+    var pubnub = null;
+
+    $( function() {
+        $( "#tabs" ).tabs();
+        $( "#menu" ).tabs();
+
+        userName = (urlParams.has('user')) ? urlParams.get('user') : prompt("Please enter your name", "");
+        productName = (urlParams.has('product')) ? urlParams.get('product') : prompt("Please enter a product name", "");
+        productPresenceChannel = "users-on-product-"+productName;
+        $('#lblStatus').html(userName + " status on " + productName + ":");
+        startPubNub();
+    } );
+
+    function statusChanged(newStatus) {
+        var newState = {
+            status: $('#status').val(),
+            timestamp: new Date()
+        };
+        pubnub.setState(
+            {
+                channels: [productPresenceChannel],
+                state: newState
+            }
+        );
+    }
+
+    function startPubNub() {
+        pubnub = new PubNub ({
+            uuid: userName,
+            subscribeKey: "sub-c-bcf3d5e6-4091-11e7-87db-02ee2ddab7fe",
+            publishKey: "pub-c-21c8cf90-1313-4447-9051-39216f1cbfd4",
+            secretKey: "sec-c-NmEyZDM3ZDEtOWZmYy00MTdjLThjOTQtY2Y0ZjAzMTBjYjRj"
+        });
+
+        pubnub.addListener({
+            status: function(statusEvent){
+                //console.log(statusEvent);
+                if (statusEvent.category === "PNConnectedCategory") {
+                    statusChanged($('#status').val());
+                    refreshUsers();
+                }
+            },
+            message: function(message){
+                console.log(message);
+            },
+            presence: function(presenceEvent){
+                //console.log(presenceEvent);
+                if (presenceEvent.action == 'state-change') {
+                    updateUserConnected(presenceEvent.uuid, presenceEvent.state.status);
+                } else if (presenceEvent.action == 'leave') {
+                    updateUserConnected(presenceEvent.uuid, 'offline');
+                }
+            }
+        });
+
+        pubnub.subscribe({
+            channels: [productPresenceChannel],
+            withPresence: true
+        });
+    }
+
+    function updateUserConnected(user, status) {
+        if (user == userName) {
+            $('#status').val(status);
+            return;
+        }
+
+        var liID = "user-"+user+"-connected";
+        var ulID = "connected-users";
+
+        if (status == 'offline') {
+            $("#"+liID).remove();
+        } else {
+            var liContent = user + " (" + status + ")";
+            if ($("#"+liID).length == 0) {
+                $("#"+ulID).append("<li id='"+liID+"'>"+liContent+"</li>");
+            } else {
+                $("#"+liID).html(liContent);
+            }
+        }
+    }
+
+    function updateMemberOnTicket(member, ticket, status) {
+        if (member == userName) return;
+        status = (status == "editing") ? " <strong>(editing)</strong>" : "";
+        var liID = "user-"+member+"-on-ticket"+ticket;
+        if ($("#"+liID).length == 0) {
+            var ulID = "usersOn"+ticket;
+            $("#"+ulID).append("<li id='"+liID+"'>"+member+status+"</li>");
+        } else {
+            $("#"+liID).html(member+status);
+        }
+    }
+
+    function removeMemberFromTicket(member, ticket) {
+        if (member == userName) return;
+        var liID = "user-"+member+"-on-ticket"+ticket;
+        $("#"+liID).remove();
+    }
+
+    function ticketContentChange(ticket, content) {
+        var status = ticketsStatus[ticket];
+
+        if (content != "" && status!="editing") {
+            ticketsStatus[ticket] = "editing";
+        }
+
+        if (content == "" && status=="editing") {
+            ticketsStatus[ticket] = "viewing";
+        }
+
+        if (status != ticketsStatus[ticket]) {
+            var newState = {
+                status: ticketsStatus[ticket],
+                timestamp: new Date()
+            };
+            ticketPresenceChannels[ticket].setState(
+                {
+                    channels: [resourceChannel(ticket)],
+                    state: newState
+                }
+            );
+        }
+    }
+
+    function subscribeToTicket(ticket) {
+        var resourcePubNub = new PubNub ({
+            uuid: userName,
+            subscribeKey: "sub-c-bcf3d5e6-4091-11e7-87db-02ee2ddab7fe",
+            publishKey: "pub-c-21c8cf90-1313-4447-9051-39216f1cbfd4",
+            secretKey: "sec-c-NmEyZDM3ZDEtOWZmYy00MTdjLThjOTQtY2Y0ZjAzMTBjYjRj"
+        });
+
+        ticketPresenceChannels[ticket] = resourcePubNub;
+
+        resourcePubNub.addListener({
+            status: function(statusEvent){
+                if (statusEvent.category === "PNConnectedCategory") {
+                    refreshUsersOnTicket(ticket);
+                }
+            },
+            message: function(message){
+                console.log(message);
+            },
+            presence: function(presenceEvent){
+                if (presenceEvent.action == 'state-change') {
+                    var status = (presenceEvent.state == undefined) ? null : presenceEvent.state.status;
+                    updateMemberOnTicket(presenceEvent.uuid, ticket, status);
+                } else if (presenceEvent.action == 'join') {
+                    updateMemberOnTicket(presenceEvent.uuid, ticket, null);
+                } else if (presenceEvent.action == 'leave') {
+                    removeMemberFromTicket(presenceEvent.uuid, ticket);
+                }
+            }
+        });
+
+        resourcePubNub.subscribe({
+            channels: [resourceChannel(ticket)],
+            withPresence: true
+        });
+    }
+
+    function unsubscribeFromTicket(ticket) {
+        ticketPresenceChannels[ticket].unsubscribe({
+            channels: [resourceChannel(ticket)]
+        })
+        ticketPresenceChannels[ticket].stop();
+    }
+
+    function openTicket(ticket) {
+        var lnkId = "lnkTk"+ticket;
+
+        if ($('#'+lnkId).length == 0) {
+            $("#tickets").append("<li id='li"+lnkId+"'><a id="+lnkId+" href='#tk-"+ticket+"'>Ticket #"+ticket+"</a></li>");
+            $('#tabs').append("<div id='tk-"+ticket+"'><div style='float: left; width: 20%; background-color: #f5f5f5;'><p>Also on this ticket</p><ul name='usersOn"+ticket+"' id='usersOn"+ticket+"'></ul></div><div style='float: right; width: 75%;'>Content of Ticket #"+ticket+"<br/><textarea onkeyup='javascript: ticketContentChange("+ticket+", $(\"#content"+ticket+"\").val());' style='width: 100%;' id='content"+ticket+"' name='content"+ticket+"'></textarea><button onclick='javascript: closeTicket("+ticket+");'>Close Ticket</button></div></div>");
+            $( "#tabs" ).tabs("refresh");
+            var n = $('#tickets > li').size();
+            $( "#tabs" ).tabs("option", "active", n-1);
+            subscribeToTicket(ticket);
+        } else {
+            $('#'+lnkId).click();
+        }
+    }
+
+    function closeTicket(ticket) {
+        var lnkId = "lnkTk"+ticket;
+        $("#li"+lnkId).remove();
+        $("#tk-"+ticket).remove();
+        unsubscribeFromTicket(ticket);
+        $( "#tabs" ).tabs("refresh");
+    }
+
+    function resourceChannel(id) {
+      return "users-on-resource-"+id;
+    }
+
+    function refreshUsers() {
+        $('#connected-users').html("");
+        pubnub.hereNow(
+            {
+                channels: [productPresenceChannel],
+                includeState: true
+            },
+            function (status, response) {
+              if (!status.error) {
+                users = response.channels[productPresenceChannel].occupants
+                for (i=0; i<users.length; i++) {
+                  user = users[i];
+                  if (user.state != undefined) {
+                    updateUserConnected(user.uuid, user.state.status);
+                  }
+                }
+              }
+            }
+        );
+    }
+
+    function refreshUsersOnTicket(ticket) {
+        $('#connected-users').html("");
+        pubnub.hereNow(
+            {
+                channels: [resourceChannel(ticket)],
+                includeState: true
+            },
+            function (status, response) {
+              if (!status.error) {
+                users = response.channels[resourceChannel(ticket)].occupants
+                for (i=0; i<users.length; i++) {
+                  user = users[i];
+                  var status = (user.state == undefined) ? null : user.state.status;
+                  updateMemberOnTicket(user.uuid, ticket, status);
+                }
+              }
+            }
+        );
+    }
+
+    function broadcastStatus() {
+        pubnub.whereNow(
+            {
+                uuid: userName
+            },
+            function (status, response) {
+                if (!status.error) {
+                    for (i=0; i<response.channels.length; i++) {
+                        var channel = response.channels[i];
+                        if (channel.startsWith("users-on-product-") && channel != productPresenceChannel) {
+                            var newState = {
+                                status: $('#status').val(),
+                                timestamp: new Date()
+                            };
+                            pubnub.setState(
+                                {
+                                    channels: [channel],
+                                    state: newState
+                                }
+                            );
+                        }
+                    }
+                }
+            }
+        );
+    }
+  </script>
+</head>
+<body>
+
+<div id="menu" style="float: left; width: 18%;">
+    <ul>
+        <li><a href="#menu-1">Menu</a></li>
+        <li><a href="#users">Users</a></li>
+    </ul>
+    <div id="menu-1">
+        <label for="ticket">Open ticket #:</label>
+        <input name="ticket" id="ticket" value="" />
+        <button onclick="javascript: openTicket($('#ticket').val());">Open</button>
+
+        <br /><br />
+        <label id="lblStatus" for="status">Status:</label>
+        <br/>
+        <select name="status" id="status" onchange="javascript: statusChanged($(this).val());">
+            <option value="available">Available</option>
+            <option value="busy">Busy</option>
+            <option value="away">Away</option>
+            <option value="meeting">Meeting</option>
+            <option value="lunch">Lunch</option>
+        </select>
+        <br/>
+        <button onclick="javascript: broadcastStatus();">Broadcast Status</button>
+    </div>
+    <div id="users">
+        <button onclick="javascript: refreshUsers();">refresh</button>
+        <ul id="connected-users">
+        </ul>
+    </div>
+</div>
+
+<div id="tabs" style="float: right; width: 80%;">
+  <ul id="tickets">
+  </ul>
+</div>
+</body>
